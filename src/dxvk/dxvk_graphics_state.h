@@ -720,6 +720,7 @@ namespace dxvk {
     DxvkOmInfo              om;
     DxvkRtInfo              rt;
     DxvkScInfo              sc;
+    uint32_t                viewMask;
     DxvkOmAttachmentSwizzle omSwizzle         [DxvkLimits::MaxNumRenderTargets];
     DxvkOmAttachmentBlend   omBlend           [DxvkLimits::MaxNumRenderTargets];
     DxvkIlAttribute         ilAttributes      [DxvkLimits::MaxNumVertexAttributes];

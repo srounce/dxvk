@@ -38,6 +38,8 @@ dxvk_shaders = files([
 
   'shaders/dxvk_fullscreen_geom.geom',
   'shaders/dxvk_fullscreen_vert.vert',
+  'shaders/dxvk_lmu_feather_frag.frag',
+  'shaders/dxvk_lmu_depth_upscale_frag.frag',
   'shaders/dxvk_fullscreen_layer_vert.vert',
 
   'shaders/dxvk_image_to_buffer_ds.comp',

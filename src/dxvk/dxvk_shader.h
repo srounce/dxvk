@@ -36,7 +36,27 @@ namespace dxvk {
              | (maxTessFactor << MaxTessFactorOffset)) { }
 
     uint32_t builtIns = 0u;
+    uint32_t reserved[3] = { };
+
+    // LMU foveation, pushed per eye at render-target bind (identity on every
+    // non-foveated bind). All indices are view 0 x, view 0 y, view 1 x, view 1 y.
+    //
+    // Vertex stage, applied to clip position as pos.xy = pos.xy*scale + offset*w:
+    // view 0 is identity (its viewport does the scaling), view 1 magnifies the
+    // focus crop about the gaze to fill its native-sized viewport.
+    static constexpr uint32_t FoveaOffset = 16u;
+    float foveaScale[4]  = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float foveaOffset[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+    // Fragment stage, applied to SV_Position.xy so screen-space lookups derived
+    // from it address true screen pixels: view 0 multiplies by fragXform[0]
+    // (1 / peripheryScale), view 1 adds (fragXform[1], fragXform[2]) (the focus
+    // crop origin in native pixels). fragXform[3] is padding.
+    static constexpr uint32_t FragOffset = 48u;
+    float fragXform[4]   = { 1.0f, 0.0f, 0.0f, 0.0f };
   };
+
+  static_assert(sizeof(DxvkBuiltInPushData) == 64u);
 
 
   /**
@@ -83,6 +103,9 @@ namespace dxvk {
     LowerConstantArrays         = 11u,
     /// Whether to enable semantic-based I/O interface matching
     SemanticIo                  = 12u,
+    /// LMU foveation: patch vertex position and fragment SV_Position
+    /// per multiview layer (see DxvkBuiltInPushData).
+    LmuFoveation                = 13u,
   };
 
   using DxvkShaderCompileFlags = Flags<DxvkShaderCompileFlag>;

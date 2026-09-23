@@ -4,6 +4,8 @@
 
 #include <util/util_log.h>
 
+#include <array>
+
 #include "dxvk_shader_ir.h"
 
 namespace dxvk {
@@ -1516,6 +1518,8 @@ namespace dxvk {
           return spv::BuiltInLayer;
         case dxbc_spv::ir::BuiltIn::eViewportIndex:
           return spv::BuiltInViewportIndex;
+        case dxbc_spv::ir::BuiltIn::eViewIndex:
+          return spv::BuiltInViewIndex;
         case dxbc_spv::ir::BuiltIn::eGsVertexCountIn:
           return std::nullopt;
         case dxbc_spv::ir::BuiltIn::eGsInstanceId:
@@ -1847,6 +1851,236 @@ namespace dxvk {
   }
 
 
+  // LMU foveation shader patches. Both read the per-view transform pushed at
+  // render-target bind (DxvkBuiltInPushData; identity for non-foveated binds)
+  // and select by the ViewIndex built-in, which reads 0 outside multiview.
+  // They run after legalizeIr (scalar SSA) and before the binding-model pass,
+  // which lays out the push data.
+
+  // Vertex: route each view to its own viewport and apply the clip transform
+  //   pos.xy = pos.xy * scale[view] + offset[view] * pos.w
+  // before every return. Linear in clip space, so clipping and interpolation
+  // stay correct. View 0 is pushed as identity (its viewport does the scaling);
+  // view 1 magnifies the focus crop about the gaze to fill its viewport.
+  static void lmuFoveationPatchVertex(dxbc_spv::ir::Builder& builder) {
+    using namespace dxbc_spv;
+
+    ir::SsaDef entryPoint = { };
+    ir::SsaDef function   = { };
+    ir::SsaDef posDecl    = { };
+
+    auto [declBegin, declEnd] = builder.getDeclarations();
+
+    for (auto iter = declBegin; iter != declEnd; iter++) {
+      if (iter->getOpCode() == ir::OpCode::eEntryPoint) {
+        auto stage = ir::ShaderStage(iter->getOperand(iter->getFirstLiteralOperandIndex()));
+
+        if (stage != ir::ShaderStage::eVertex)
+          return;
+
+        entryPoint = iter->getDef();
+        function   = ir::SsaDef(iter->getOperand(0u));
+      } else if (iter->getOpCode() == ir::OpCode::eDclOutputBuiltIn) {
+        auto builtIn = ir::BuiltIn(iter->getOperand(iter->getFirstLiteralOperandIndex()));
+
+        if (builtIn == ir::BuiltIn::ePosition)
+          posDecl = iter->getDef();
+      }
+    }
+
+    if (!entryPoint || !function || !posDecl)
+      return;
+
+    const auto& posType = builder.getOp(posDecl).getType();
+
+    if (!posType.isBasicType()
+     || posType.getBaseType(0u).getVectorSize() != 4u
+     || !posType.getBaseType(0u).isFloatType())
+      return;
+
+    small_vector<ir::SsaDef, 4u> returns;
+
+    for (auto iter = builder.iter(function); iter->getOpCode() != ir::OpCode::eFunctionEnd; iter++) {
+      if (iter->getOpCode() == ir::OpCode::eReturn)
+        returns.push_back(iter->getDef());
+    }
+
+    if (returns.empty())
+      return;
+
+    auto viewIn = builder.add(ir::Op::DclInputBuiltIn(
+      ir::ScalarType::eU32, entryPoint, ir::BuiltIn::eViewIndex));
+    builder.add(ir::Op::DebugName(viewIn, "lmuViewIndex"));
+
+    auto vpOut = builder.add(ir::Op::DclOutputBuiltIn(
+      ir::ScalarType::eU32, entryPoint, ir::BuiltIn::eViewportIndex));
+    builder.add(ir::Op::DebugName(vpOut, "lmuViewportIndex"));
+
+    // foveaScale[4] then foveaOffset[4]: view0 x, view0 y, view1 x, view1 y.
+    static const char* const s_pushNames[8] = {
+      "lmuFoveaScale0X",  "lmuFoveaScale0Y",  "lmuFoveaScale1X",  "lmuFoveaScale1Y",
+      "lmuFoveaOffset0X", "lmuFoveaOffset0Y", "lmuFoveaOffset1X", "lmuFoveaOffset1Y" };
+
+    std::array<ir::SsaDef, 8u> push = { };
+
+    for (uint32_t i = 0u; i < 8u; i++) {
+      push[i] = builder.add(ir::Op::DclPushData(ir::ScalarType::eF32, entryPoint,
+        DxvkBuiltInPushData::FoveaOffset + uint32_t(sizeof(float)) * i, ir::ShaderStageMask()));
+      builder.add(ir::Op::DebugName(push[i], s_pushNames[i]));
+    }
+
+    auto c0 = builder.makeConstant(uint32_t(0u));
+    auto c1 = builder.makeConstant(uint32_t(1u));
+    auto c3 = builder.makeConstant(uint32_t(3u));
+
+    const ir::Type f32(ir::ScalarType::eF32);
+    const ir::Type u32(ir::ScalarType::eU32);
+    const ir::Type b32(ir::ScalarType::eBool);
+
+    for (auto ret : returns) {
+      auto x    = builder.addBefore(ret, ir::Op::OutputLoad(f32, posDecl, c0));
+      auto y    = builder.addBefore(ret, ir::Op::OutputLoad(f32, posDecl, c1));
+      auto w    = builder.addBefore(ret, ir::Op::OutputLoad(f32, posDecl, c3));
+      auto view = builder.addBefore(ret, ir::Op::InputLoad(u32, viewIn, ir::SsaDef()));
+      builder.addBefore(ret, ir::Op::OutputStore(vpOut, ir::SsaDef(), view));
+
+      auto s0x = builder.addBefore(ret, ir::Op::PushDataLoad(f32, push[0], ir::SsaDef()));
+      auto s0y = builder.addBefore(ret, ir::Op::PushDataLoad(f32, push[1], ir::SsaDef()));
+      auto s1x = builder.addBefore(ret, ir::Op::PushDataLoad(f32, push[2], ir::SsaDef()));
+      auto s1y = builder.addBefore(ret, ir::Op::PushDataLoad(f32, push[3], ir::SsaDef()));
+      auto o0x = builder.addBefore(ret, ir::Op::PushDataLoad(f32, push[4], ir::SsaDef()));
+      auto o0y = builder.addBefore(ret, ir::Op::PushDataLoad(f32, push[5], ir::SsaDef()));
+      auto o1x = builder.addBefore(ret, ir::Op::PushDataLoad(f32, push[6], ir::SsaDef()));
+      auto o1y = builder.addBefore(ret, ir::Op::PushDataLoad(f32, push[7], ir::SsaDef()));
+
+      auto isFocus = builder.addBefore(ret, ir::Op::IEq(b32, view, c1));
+
+      auto sx = builder.addBefore(ret, ir::Op::Select(f32, isFocus, s1x, s0x));
+      auto sy = builder.addBefore(ret, ir::Op::Select(f32, isFocus, s1y, s0y));
+      auto ox = builder.addBefore(ret, ir::Op::Select(f32, isFocus, o1x, o0x));
+      auto oy = builder.addBefore(ret, ir::Op::Select(f32, isFocus, o1y, o0y));
+
+      auto oxw = builder.addBefore(ret, ir::Op::FMul(f32, ox, w));
+      auto oyw = builder.addBefore(ret, ir::Op::FMul(f32, oy, w));
+      auto nx  = builder.addBefore(ret, ir::Op::FMad(f32, x, sx, oxw));
+      auto ny  = builder.addBefore(ret, ir::Op::FMad(f32, y, sy, oyw));
+
+      builder.addBefore(ret, ir::Op::OutputStore(posDecl, c0, nx));
+      builder.addBefore(ret, ir::Op::OutputStore(posDecl, c1, ny));
+    }
+  }
+
+
+  // Fragment: SV_Position is viewport-local in the foveated views (the
+  // periphery viewport is peripheryScale x eye, the focus viewport is the
+  // crop). Remap its x and y to true screen pixels so screen-space lookups
+  // derived from it (shadow, AO and reflection masks) address the right place:
+  //   view 0: xy * fragXform[0]            (1 / periphery scale)
+  //   view 1: xy + (fragXform[1], [2])     (focus crop origin, pixels)
+  // Each scalar load of components 0/1 is rewritten in place, so every use
+  // sees the remapped value. Identity is pushed for non-foveated binds.
+  static void lmuFoveationPatchFragment(dxbc_spv::ir::Builder& builder) {
+    using namespace dxbc_spv;
+
+    ir::SsaDef entryPoint = { };
+    ir::SsaDef function   = { };
+    ir::SsaDef posDecl    = { };
+
+    auto [declBegin, declEnd] = builder.getDeclarations();
+
+    for (auto iter = declBegin; iter != declEnd; iter++) {
+      if (iter->getOpCode() == ir::OpCode::eEntryPoint) {
+        auto stage = ir::ShaderStage(iter->getOperand(iter->getFirstLiteralOperandIndex()));
+
+        if (stage != ir::ShaderStage::ePixel)
+          return;
+
+        entryPoint = iter->getDef();
+        function   = ir::SsaDef(iter->getOperand(0u));
+      } else if (iter->getOpCode() == ir::OpCode::eDclInputBuiltIn) {
+        auto builtIn = ir::BuiltIn(iter->getOperand(iter->getFirstLiteralOperandIndex()));
+
+        if (builtIn == ir::BuiltIn::ePosition)
+          posDecl = iter->getDef();
+      }
+    }
+
+    if (!entryPoint || !function || !posDecl)
+      return;
+
+    // Scalar loads of x or y (component constant 0 or 1).
+    small_vector<std::pair<ir::SsaDef, uint32_t>, 8u> loads;
+
+    for (auto iter = builder.iter(function); iter->getOpCode() != ir::OpCode::eFunctionEnd; iter++) {
+      if (iter->getOpCode() != ir::OpCode::eInputLoad
+       || ir::SsaDef(iter->getOperand(0u)) != posDecl)
+        continue;
+
+      const auto& type = iter->getType();
+
+      if (!type.isBasicType()
+       || type.getBaseType(0u).getVectorSize() != 1u
+       || !type.getBaseType(0u).isFloatType())
+        continue;
+
+      auto addr = ir::SsaDef(iter->getOperand(1u));
+
+      if (!addr)
+        continue;
+
+      const auto& addrOp = builder.getOp(addr);
+
+      if (addrOp.getOpCode() != ir::OpCode::eConstant)
+        continue;
+
+      uint32_t component = uint32_t(addrOp.getOperand(addrOp.getFirstLiteralOperandIndex()));
+
+      if (component < 2u)
+        loads.push_back({ iter->getDef(), component });
+    }
+
+    if (loads.empty())
+      return;
+
+    auto viewIn = builder.add(ir::Op::DclInputBuiltIn(
+      ir::ScalarType::eU32, entryPoint, ir::BuiltIn::eViewIndex));
+    builder.add(ir::Op::DebugName(viewIn, "lmuViewIndex"));
+
+    static const char* const s_pushNames[3] = {
+      "lmuFragScale0", "lmuFragOffset1X", "lmuFragOffset1Y" };
+
+    std::array<ir::SsaDef, 3u> push = { };
+
+    for (uint32_t i = 0u; i < 3u; i++) {
+      push[i] = builder.add(ir::Op::DclPushData(ir::ScalarType::eF32, entryPoint,
+        DxvkBuiltInPushData::FragOffset + uint32_t(sizeof(float)) * i, ir::ShaderStageMask()));
+      builder.add(ir::Op::DebugName(push[i], s_pushNames[i]));
+    }
+
+    auto c1   = builder.makeConstant(uint32_t(1u));
+    auto one  = builder.makeConstant(1.0f);
+    auto zero = builder.makeConstant(0.0f);
+
+    const ir::Type f32(ir::ScalarType::eF32);
+    const ir::Type u32(ir::ScalarType::eU32);
+    const ir::Type b32(ir::ScalarType::eBool);
+
+    for (const auto& [load, component] : loads) {
+      auto addr = ir::SsaDef(builder.getOp(load).getOperand(1u));
+
+      auto raw     = builder.addBefore(load, ir::Op::InputLoad(f32, posDecl, addr));
+      auto view    = builder.addBefore(load, ir::Op::InputLoad(u32, viewIn, ir::SsaDef()));
+      auto isFocus = builder.addBefore(load, ir::Op::IEq(b32, view, c1));
+      auto sP      = builder.addBefore(load, ir::Op::PushDataLoad(f32, push[0], ir::SsaDef()));
+      auto oF      = builder.addBefore(load, ir::Op::PushDataLoad(f32, push[1u + component], ir::SsaDef()));
+      auto scale   = builder.addBefore(load, ir::Op::Select(f32, isFocus, one, sP));
+      auto offset  = builder.addBefore(load, ir::Op::Select(f32, isFocus, oF, zero));
+
+      builder.rewriteOp(load, ir::Op::FMad(f32, raw, scale, offset));
+    }
+  }
+
+
   void DxvkIrShader::convertShader() {
     DxvkDxbcSpirvLogger logger(m_debugName);
 
@@ -1909,6 +2143,11 @@ namespace dxvk {
       options.descriptorIndexing.optimizeDescriptorIndexing = true;
 
     dxbc_spv::ir::legalizeIr(builder, options);
+
+    if (m_info.options.flags.test(DxvkShaderCompileFlag::LmuFoveation)) {
+      lmuFoveationPatchVertex(builder);
+      lmuFoveationPatchFragment(builder);
+    }
 
     // Generate shader metadata based on the final code
     DxvkIrLowerBindingModelPass lowerBindingModelPass(builder, *m_baseIr, m_info);
@@ -2076,6 +2315,8 @@ namespace dxvk {
         return dxbc_spv::ir::BuiltIn::eLayerIndex;
       case spv::BuiltInViewportIndex:
         return dxbc_spv::ir::BuiltIn::eViewportIndex;
+      case spv::BuiltInViewIndex:
+        return dxbc_spv::ir::BuiltIn::eViewIndex;
       case spv::BuiltInInvocationId: {
         if (stage == VK_SHADER_STAGE_GEOMETRY_BIT)
           return dxbc_spv::ir::BuiltIn::eGsInstanceId;

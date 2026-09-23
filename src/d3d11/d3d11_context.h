@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <type_traits>
 #include <vector>
 
@@ -781,6 +782,13 @@ namespace dxvk {
             VkImageLayout             NewLayout);
 
   protected:
+
+    // LMU foveation: per-view viewport scales (periphery, focus) of the bound
+    // target relative to the eye viewport, both 1.0 unless it is the foveated
+    // eye shadow; and the last per-view push block emitted, so BindFramebuffer
+    // only re-pushes on change (starts as a sentinel so the first bind pushes).
+    std::array<float, 2>  m_lmuViewportScale = { 1.0f, 1.0f };
+    std::array<float, 12> m_lmuFoveaPushed = { };
 
     D3D11DeviceContextExt<ContextType>        m_contextExt;
     D3D11UserDefinedAnnotation<ContextType>   m_annotation;

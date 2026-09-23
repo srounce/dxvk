@@ -331,6 +331,8 @@ namespace dxvk {
       }
     }
 
+    rtInfo.viewMask = state.viewMask;
+
     if (rtInfo.colorAttachmentCount) {
       rtInfo.pColorAttachmentFormats = rtColorFormats.data();
 
@@ -381,6 +383,7 @@ namespace dxvk {
 
   bool DxvkGraphicsPipelineFragmentOutputState::eq(const DxvkGraphicsPipelineFragmentOutputState& other) const {
     bool eq = rtInfo.colorAttachmentCount     == other.rtInfo.colorAttachmentCount
+           && rtInfo.viewMask                 == other.rtInfo.viewMask
            && rtInfo.depthAttachmentFormat    == other.rtInfo.depthAttachmentFormat
            && rtInfo.stencilAttachmentFormat  == other.rtInfo.stencilAttachmentFormat
            && cbInfo.logicOpEnable            == other.cbInfo.logicOpEnable
@@ -423,6 +426,7 @@ namespace dxvk {
   size_t DxvkGraphicsPipelineFragmentOutputState::hash() const {
     DxvkHashState hash;
     hash.add(uint32_t(rtInfo.colorAttachmentCount));
+    hash.add(uint32_t(rtInfo.viewMask));
     hash.add(uint32_t(rtInfo.depthAttachmentFormat));
     hash.add(uint32_t(rtInfo.stencilAttachmentFormat));
     hash.add(uint32_t(cbInfo.logicOpEnable));
@@ -1219,6 +1223,12 @@ namespace dxvk {
   bool DxvkGraphicsPipeline::canCreateBasePipeline(
     const DxvkGraphicsPipelineStateInfo& state) const {
     if (!m_device->canUseGraphicsPipelineLibrary())
+      return false;
+
+    // Multiview pipelines are compiled monolithically: cached shader libraries
+    // are built with view mask 0 and cannot be fast-linked into a render pass
+    // with a different mask.
+    if (state.viewMask)
       return false;
 
     // We do not implement setting certain rarely used render

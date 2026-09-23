@@ -18,6 +18,14 @@ namespace dxvk {
     this->relaxedBarriers       = config.getOption<bool>("d3d11.relaxedBarriers", false);
     this->relaxedGraphicsBarriers = config.getOption<bool>("d3d11.relaxedGraphicsBarriers", false);
     this->maxTessFactor         = config.getOption<int32_t>("d3d11.maxTessFactor", 0);
+    this->lmuFoveation          = config.getOption<bool>("d3d11.lmuFoveation", false);
+    this->lmuFoveationFocusCrop = config.getOption<float>("d3d11.lmuFoveationFocusCrop", 0.4f);
+    this->lmuFoveationPeripheryScale = config.getOption<float>("d3d11.lmuFoveationPeripheryScale", 0.5f);
+    this->lmuFoveationFocusInset = config.getOption<float>("d3d11.lmuFoveationFocusInset", 0.25f);
+    this->lmuFoveationFeather   = config.getOption<float>("d3d11.lmuFoveationFeather", 0.15f);
+    this->lmuFoveationGaze      = config.getOption<bool>("d3d11.lmuFoveationGaze", false);
+    this->lmuFoveationFragCoordRemap = config.getOption<bool>("d3d11.lmuFoveationFragCoordRemap", true);
+    this->lmuFoveationDebug     = config.getOption<bool>("d3d11.lmuFoveationDebug", false);
     this->samplerAnisotropy     = config.getOption<int32_t>("d3d11.samplerAnisotropy", -1);
     this->samplerLodBias        = config.getOption<float>("d3d11.samplerLodBias", 0.0f);
     this->clampNegativeLodBias  = config.getOption<bool>("d3d11.clampNegativeLodBias", false);

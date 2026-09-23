@@ -837,6 +837,7 @@ namespace dxvk {
       ENABLE_FEATURE(core.features, wideLines, false),
 
       ENABLE_FEATURE(vk11, shaderDrawParameters, true),
+      ENABLE_FEATURE(vk11, multiview, false),
       ENABLE_FEATURE(vk11, storagePushConstant16, false),
 
       ENABLE_FEATURE(vk12, bufferDeviceAddress, true),

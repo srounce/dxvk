@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -46,6 +47,8 @@ namespace dxvk {
    * Implements the ID3D11Device interfaces
    * as part of a \ref D3D11DeviceContainer.
    */
+  class D3D11FoveationManager;
+
   class D3D11Device final : public ID3D11Device5 {
     /// Maximum number of resource init commands per command buffer
     constexpr static uint64_t InitCommandThreshold = 50;
@@ -418,6 +421,10 @@ namespace dxvk {
     Rc<DxvkDevice> GetDXVKDevice() {
       return m_dxvkDevice;
     }
+
+    D3D11FoveationManager* GetFoveation() {
+      return m_foveation.get();
+    }
     
     void FlushInitCommands() {
       m_initializer->FlushCsChunk();
@@ -506,6 +513,7 @@ namespace dxvk {
 
     DxvkCsChunkPool                 m_csChunkPool;
 
+    std::unique_ptr<D3D11FoveationManager> m_foveation;
     D3D11Initializer*               m_initializer = nullptr;
     D3D10Device*                    m_d3d10Device = nullptr;
 

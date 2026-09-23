@@ -17,6 +17,7 @@
 #include "d3d11_context_def.h"
 #include "d3d11_context_imm.h"
 #include "d3d11_device.h"
+#include "d3d11_foveation.h"
 #include "d3d11_fence.h"
 #include "d3d11_input_layout.h"
 #include "d3d11_interop.h"
@@ -54,6 +55,7 @@ namespace dxvk {
     m_maxFeatureLevel   (GetMaxFeatureLevel(m_dxvkDevice->instance(), m_dxvkDevice->adapter())),
     m_deviceFeatures    (m_dxvkDevice->instance(), m_dxvkDevice->adapter(), m_d3d11Options, m_featureLevel) {
     m_initializer = new D3D11Initializer(this);
+    m_foveation = std::make_unique<D3D11FoveationManager>(this);
     m_context     = new D3D11ImmediateContext(this, m_dxvkDevice);
     m_d3d10Device = new D3D10Device(this, m_context.ptr());
   }
@@ -2759,6 +2761,9 @@ namespace dxvk {
 
     if (Options.forceSampleRateShading)
       result.flags.set(DxvkShaderCompileFlag::EnableSampleRateShading);
+
+    if (Options.lmuFoveation)
+      result.flags.set(DxvkShaderCompileFlag::LmuFoveation);
 
     return result;
   }

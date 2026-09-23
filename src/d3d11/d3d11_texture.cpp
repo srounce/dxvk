@@ -2,6 +2,7 @@
 #include "d3d11_context_imm.h"
 #include "d3d11_gdi.h"
 #include "d3d11_texture.h"
+#include "d3d11_foveation.h"
 
 #include "../util/util_shared_res.h"
 #include "../util/util_win32_compat.h"
@@ -243,6 +244,9 @@ namespace dxvk {
       m_image = m_device->GetDXVKDevice()->createImage(imageInfo, memoryProperties);
     else
       m_image = m_device->GetDXVKDevice()->importImage(imageInfo, vkImage, memoryProperties);
+
+    if (vkImage)
+      m_device->GetFoveation()->noteImportedImage(imageInfo);
 
     if (m_mapMode == D3D11_COMMON_TEXTURE_MAP_MODE_DIRECT)
       m_mapPtr = m_image->mapPtr(0);
