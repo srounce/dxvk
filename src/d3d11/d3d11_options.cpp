@@ -25,6 +25,7 @@ namespace dxvk {
     this->lmuFoveationFeather   = config.getOption<float>("d3d11.lmuFoveationFeather", 0.15f);
     this->lmuFoveationGaze      = config.getOption<bool>("d3d11.lmuFoveationGaze", false);
     this->lmuFoveationFragCoordRemap = config.getOption<bool>("d3d11.lmuFoveationFragCoordRemap", true);
+    this->lmuFoveationCostGuard = config.getOption<bool>("d3d11.lmuFoveationCostGuard", true);
     this->lmuFoveationDebug     = config.getOption<bool>("d3d11.lmuFoveationDebug", false);
     this->samplerAnisotropy     = config.getOption<int32_t>("d3d11.samplerAnisotropy", -1);
     this->samplerLodBias        = config.getOption<float>("d3d11.samplerLodBias", 0.0f);
