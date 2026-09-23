@@ -8,7 +8,38 @@
 #include "dxvk_device.h"
 #include "dxvk_context.h"
 
+#include "dxvk_shader_builtin.h"
+
+#include <dxvk_lmu_feather_frag.h>
+#include <dxvk_lmu_depth_upscale_frag.h>
+
 namespace dxvk {
+
+  struct LmuFeatherArgs {
+    uint32_t sampler;
+    float    feather;
+    float    originX, originY;     // full focus rect, framebuffer pixels
+    float    sizeX,   sizeY;
+    float    srcScaleX, srcScaleY; // fraction of the source layer the focus occupies
+  };
+
+  struct LmuDepthUpscaleArgs {
+    float    scaleX, scaleY;       // shadow pixels per native pixel
+    float    srcMaxX, srcMaxY;     // last valid shadow texel of the periphery sub-rect
+  };
+
+  // Fullscreen-triangle vertex stage shared by the LMU meta-ops. The GLSL
+  // fragment shaders take nothing from it but the rasterized position.
+  static std::vector<uint32_t> lmuBuildFullscreenVs(
+          DxvkDevice*               device,
+    const DxvkPipelineLayout*       layout,
+    const char*                     name) {
+    dxbc_spv::ir::Builder builder;
+
+    DxvkBuiltInShader helper(device, layout, name);
+    helper.buildFullscreenVertexShader(builder);
+    return helper.buildShader(builder);
+  }
   
   DxvkContext::DxvkContext(const Rc<DxvkDevice>& device)
   : m_device      (device),
@@ -85,7 +116,11 @@ namespace dxvk {
   
   
   DxvkContext::~DxvkContext() {
-    
+    if (m_lmuFeatherPipeline)
+      m_device->vkd()->vkDestroyPipeline(m_device->vkd()->device(), m_lmuFeatherPipeline, nullptr);
+
+    if (m_lmuDepthPipeline)
+      m_device->vkd()->vkDestroyPipeline(m_device->vkd()->device(), m_lmuDepthPipeline, nullptr);
   }
   
   
@@ -3492,6 +3527,218 @@ namespace dxvk {
   }
 
 
+  void DxvkContext::lmuDepthUpscale(
+          Rc<DxvkImageView>     dstView,
+          Rc<DxvkImageView>     srcView,
+          VkExtent2D            srcExtent,
+          VkExtent2D            dstExtent) {
+    // Runs mid-frame at SRV bind, possibly inside the game's render pass.
+    this->endCurrentPass(true);
+    invalidateState();
+
+    dstView = ensureImageViewCompatibility(dstView, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    srcView = ensureImageViewCompatibility(srcView, VK_IMAGE_USAGE_SAMPLED_BIT);
+
+    if (!dstView || !srcView)
+      return;
+
+    VkFormat format = dstView->info().format;
+    VkSampleCountFlagBits samples = dstView->image()->info().sampleCount;
+
+    // The built-in depth-attachment state gives a depth write with
+    // COMPARE_OP_ALWAYS and per-sample shading: exactly the write-through
+    // this pass needs. Depth format and sample count follow the eye depth.
+    if (m_lmuDepthPipeline == VK_NULL_HANDLE || m_lmuDepthFormat != format || m_lmuDepthSamples != samples) {
+      if (!m_lmuDepthLayout) {
+        DxvkDescriptorSetLayoutBinding binding = { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT };
+        m_lmuDepthLayout = m_device->createBuiltInPipelineLayout(
+          DxvkPipelineLayoutFlags(), VK_SHADER_STAGE_FRAGMENT_BIT,
+          sizeof(LmuDepthUpscaleArgs), 1, &binding);
+      }
+
+      if (m_lmuDepthPipeline)
+        m_device->vkd()->vkDestroyPipeline(m_device->vkd()->device(), m_lmuDepthPipeline, nullptr);
+
+      auto vsSpirv = lmuBuildFullscreenVs(m_device.ptr(), m_lmuDepthLayout, "lmu_depth_upscale_vs");
+
+      util::DxvkBuiltInGraphicsState state = { };
+      state.vs = util::DxvkBuiltInShaderStage(vsSpirv);
+      state.fs = util::DxvkBuiltInShaderStage(dxvk_lmu_depth_upscale_frag, nullptr);
+      state.depthFormat = format;
+      state.sampleCount = samples;
+
+      m_lmuDepthPipeline = m_device->createBuiltInGraphicsPipeline(m_lmuDepthLayout, state);
+      m_lmuDepthFormat = format;
+      m_lmuDepthSamples = samples;
+    }
+
+    small_vector<DxvkResourceAccess, 2u> accessBatch;
+    accessBatch.emplace_back(*dstView,
+      VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, false);
+    accessBatch.emplace_back(*srcView, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+      VK_ACCESS_2_SHADER_READ_BIT, false);
+    syncResources(DxvkCmdBuffer::ExecBuffer, accessBatch.size(), accessBatch.data());
+
+    VkRect2D dstRect = { { 0, 0 }, dstExtent };
+
+    VkViewport viewport = { };
+    viewport.width = float(dstExtent.width);
+    viewport.height = float(dstExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
+    VkRenderingAttachmentInfo depthInfo = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    depthInfo.imageView = dstView->handle();
+    depthInfo.imageLayout = dstView->getLayout();
+    depthInfo.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo renderingInfo = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    renderingInfo.renderArea = dstRect;
+    renderingInfo.layerCount = 1u;
+    renderingInfo.pDepthAttachment = &depthInfo;
+
+    m_cmd->cmdBeginRendering(DxvkCmdBuffer::ExecBuffer, &renderingInfo);
+    m_cmd->cmdSetViewport(1, &viewport);
+    m_cmd->cmdSetScissor(1, &dstRect);
+
+    DxvkDescriptorWrite imageDescriptor = { };
+    imageDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    imageDescriptor.descriptor = srcView->getDescriptor();
+
+    LmuDepthUpscaleArgs args = { };
+    args.scaleX  = float(srcExtent.width)  / float(dstExtent.width);
+    args.scaleY  = float(srcExtent.height) / float(dstExtent.height);
+    args.srcMaxX = float(srcExtent.width  - 1u);
+    args.srcMaxY = float(srcExtent.height - 1u);
+
+    m_cmd->cmdBindPipeline(DxvkCmdBuffer::ExecBuffer,
+      VK_PIPELINE_BIND_POINT_GRAPHICS, m_lmuDepthPipeline);
+
+    m_cmd->bindResources(DxvkCmdBuffer::ExecBuffer,
+      m_lmuDepthLayout, 1u, &imageDescriptor, sizeof(args), &args);
+
+    m_cmd->cmdDraw(3, 1, 0, 0);
+    m_cmd->cmdEndRendering(DxvkCmdBuffer::ExecBuffer);
+  }
+
+
+  void DxvkContext::lmuFeatherComposite(
+          Rc<DxvkImageView>     dstView,
+          Rc<DxvkImageView>     srcView,
+          VkExtent2D            srcExtent,
+          VkRect2D              dstRect,
+          VkOffset2D            fullOrigin,
+          VkExtent2D            fullExtent,
+          float                 feather) {
+    this->endCurrentPass(true);
+    invalidateState();
+
+    dstView = ensureImageViewCompatibility(dstView, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    srcView = ensureImageViewCompatibility(srcView, VK_IMAGE_USAGE_SAMPLED_BIT);
+
+    if (!dstView || !srcView)
+      return;
+
+    if (m_lmuFeatherPipeline == VK_NULL_HANDLE || m_lmuFeatherFormat != dstView->info().format) {
+      if (!m_lmuFeatherLayout) {
+        DxvkDescriptorSetLayoutBinding binding = { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT };
+        m_lmuFeatherLayout = m_device->createBuiltInPipelineLayout(
+          DxvkPipelineLayoutFlag::UsesSamplerHeap, VK_SHADER_STAGE_FRAGMENT_BIT,
+          sizeof(LmuFeatherArgs), 1, &binding);
+      }
+
+      if (m_lmuFeatherPipeline)
+        m_device->vkd()->vkDestroyPipeline(m_device->vkd()->device(), m_lmuFeatherPipeline, nullptr);
+
+      // The feather ramp is the blend factor only; RGB write so the scene's
+      // own alpha in the resolved image is left untouched.
+      VkPipelineColorBlendAttachmentState cb = { };
+      cb.blendEnable = VK_TRUE;
+      cb.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+      cb.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+      cb.colorBlendOp = VK_BLEND_OP_ADD;
+      cb.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+      cb.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+      cb.alphaBlendOp = VK_BLEND_OP_ADD;
+      cb.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
+
+      auto vsSpirv = lmuBuildFullscreenVs(m_device.ptr(), m_lmuFeatherLayout, "lmu_feather_vs");
+
+      util::DxvkBuiltInGraphicsState state = { };
+      state.vs = util::DxvkBuiltInShaderStage(vsSpirv);
+      state.fs = util::DxvkBuiltInShaderStage(dxvk_lmu_feather_frag, nullptr);
+      state.colorFormats[0] = dstView->info().format;
+      state.sampleCount = VK_SAMPLE_COUNT_1_BIT;
+      state.cbAttachment = &cb;
+
+      m_lmuFeatherPipeline = m_device->createBuiltInGraphicsPipeline(m_lmuFeatherLayout, state);
+      m_lmuFeatherFormat = dstView->info().format;
+    }
+
+    small_vector<DxvkResourceAccess, 2u> accessBatch;
+    accessBatch.emplace_back(*dstView, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+      VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, false);
+    accessBatch.emplace_back(*srcView, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+      VK_ACCESS_2_SHADER_READ_BIT, false);
+    syncResources(DxvkCmdBuffer::ExecBuffer, accessBatch.size(), accessBatch.data());
+
+    VkViewport viewport = { };
+    viewport.x = float(dstRect.offset.x);
+    viewport.y = float(dstRect.offset.y);
+    viewport.width = float(dstRect.extent.width);
+    viewport.height = float(dstRect.extent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
+    VkRenderingAttachmentInfo attachmentInfo = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    attachmentInfo.imageView = dstView->handle();
+    attachmentInfo.imageLayout = dstView->getLayout();
+    attachmentInfo.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachmentInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo renderingInfo = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    renderingInfo.renderArea = dstRect;
+    renderingInfo.layerCount = 1u;
+    renderingInfo.colorAttachmentCount = 1u;
+    renderingInfo.pColorAttachments = &attachmentInfo;
+
+    m_cmd->cmdBeginRendering(DxvkCmdBuffer::ExecBuffer, &renderingInfo);
+    m_cmd->cmdSetViewport(1, &viewport);
+    m_cmd->cmdSetScissor(1, &dstRect);
+
+    Rc<DxvkSampler> sampler = createBlitSampler(VK_FILTER_LINEAR);
+
+    DxvkDescriptorWrite imageDescriptor = { };
+    imageDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    imageDescriptor.descriptor = srcView->getDescriptor();
+
+    const auto& srcImg = srcView->image()->info().extent;
+
+    LmuFeatherArgs args = { };
+    args.sampler   = sampler->getDescriptor().samplerIndex;
+    args.feather   = feather;
+    args.originX   = float(fullOrigin.x);
+    args.originY   = float(fullOrigin.y);
+    args.sizeX     = float(fullExtent.width);
+    args.sizeY     = float(fullExtent.height);
+    args.srcScaleX = float(srcExtent.width)  / float(srcImg.width);
+    args.srcScaleY = float(srcExtent.height) / float(srcImg.height);
+
+    m_cmd->cmdBindPipeline(DxvkCmdBuffer::ExecBuffer,
+      VK_PIPELINE_BIND_POINT_GRAPHICS, m_lmuFeatherPipeline);
+
+    m_cmd->bindResources(DxvkCmdBuffer::ExecBuffer,
+      m_lmuFeatherLayout, 1u, &imageDescriptor, sizeof(args), &args);
+
+    m_cmd->cmdDraw(3, 1, 0, 0);
+    m_cmd->cmdEndRendering(DxvkCmdBuffer::ExecBuffer);
+
+    m_cmd->track(std::move(sampler));
+  }
+
+
   void DxvkContext::blitImageHw(
     const Rc<DxvkImageView>&    dstView,
     const VkOffset3D*           dstOffsets,
@@ -6515,6 +6762,7 @@ namespace dxvk {
     renderingInfo.renderArea.offset = VkOffset2D { 0, 0 };
     renderingInfo.renderArea.extent = VkExtent2D { fbSize.width, fbSize.height };
     renderingInfo.layerCount = fbSize.layers;
+    renderingInfo.viewMask = m_state.om.renderTargets.viewMask;
 
     if (colorInfoCount) {
       renderingInfo.colorAttachmentCount = colorInfoCount;
@@ -7659,6 +7907,7 @@ namespace dxvk {
       // Update relevant graphics pipeline state
       m_state.gp.state.ms.setSampleCount(fbInfo.getSampleCount());
       m_state.gp.state.rt = fbInfo.getRtInfo();
+      m_state.gp.state.viewMask = m_state.om.renderTargets.viewMask;
 
       for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
         const auto& attachment = fbInfo.getColorTarget(i).view;

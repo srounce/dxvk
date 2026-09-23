@@ -3,6 +3,7 @@
 #include "d3d11_context.h"
 #include "d3d11_context_def.h"
 #include "d3d11_context_imm.h"
+#include "d3d11_foveation.h"
 
 namespace dxvk {
 
@@ -451,8 +452,9 @@ namespace dxvk {
 
     AddCost(GpuCostEstimate::Transfer);
 
+    // LMU foveation: the scene renders into the eye shadow, so clear that.
     DxvkAttachment attachment = {};
-    attachment.view = rtv->GetImageView();
+    attachment.view = m_parent->GetFoveation()->remapAttachmentView(rtv->GetImageView());
     attachment.shadow = rtv->GetBufferView();
 
     EmitCs([
@@ -699,7 +701,7 @@ namespace dxvk {
     clearValue.depthStencil.stencil = Stencil;
 
     DxvkAttachment attachment = {};
-    attachment.view = dsv->GetImageView();
+    attachment.view = m_parent->GetFoveation()->remapAttachmentView(dsv->GetImageView());
 
     EmitCs([
       cClearValue = clearValue,
@@ -895,10 +897,101 @@ namespace dxvk {
       srcSubresource.mipLevel,
       srcSubresource.arrayLayer, 1 };
 
+    // LMU foveation: the eye scene was rendered into the two-layer shadow.
+    // Resolve each layer's sub-rectangle, upscale the periphery over the
+    // game's resolved image, then composite the focus into its rectangle.
+    D3D11FoveatedResolve fov =
+      m_parent->GetFoveation()->prepareResolve(srcTextureInfo->GetImage(), dstTextureInfo->GetImage());
+
+    if (fov.active) {
+      EmitCs([
+        cResolved   = fov.resolved,
+        cMsaa       = fov.msaa,
+        cResolvView = fov.resolvedView,
+        cFocusView  = fov.focusView,
+        cDstView    = fov.dstView,
+        cSrcSubres  = srcSubresourceLayers,
+        cPeriSrc    = fov.peripherySrcExtent,
+        cFocusSrc   = fov.focusSrcExtent,
+        cDstExt     = fov.dstExtent,
+        cLayers     = fov.layerCount,
+        cFocusOff   = fov.focusOffset,
+        cFocusExt   = fov.focusExtent,
+        cFullOff    = fov.focusFullOffset,
+        cFullExt    = fov.focusFullExtent,
+        cFeather    = fov.feather,
+        cDebug      = fov.debugBorder,
+        cFormat     = m_parent->LookupFormat(Format, DXGI_VK_FORMAT_MODE_ANY).Format
+      ] (DxvkContext* ctx) {
+        VkFormat format = cFormat ? cFormat : cMsaa->info().format;
+
+        // Layers are resolved separately: a single multi-layer region is not
+        // honoured by every resolve path.
+        for (uint32_t layer = 0u; layer < cLayers; layer++) {
+          VkExtent2D ext = layer == 0u ? cPeriSrc : cFocusSrc;
+
+          VkImageResolve region = { };
+          region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, cSrcSubres.mipLevel, layer, 1u };
+          region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0u, layer, 1u };
+          region.extent = VkExtent3D { ext.width, ext.height, 1u };
+
+          ctx->resolveImage(cResolved, cMsaa, region, format,
+            getDefaultResolveMode(format), VK_RESOLVE_MODE_NONE);
+        }
+
+        VkOffset3D dstOffsets[2] = { { 0, 0, 0 },
+          { int32_t(cDstExt.width), int32_t(cDstExt.height), 1 } };
+        VkOffset3D srcOffsets[2] = { { 0, 0, 0 },
+          { int32_t(cPeriSrc.width), int32_t(cPeriSrc.height), 1 } };
+
+        ctx->blitImageView(cDstView, dstOffsets, cResolvView, srcOffsets, VK_FILTER_LINEAR);
+
+        if (cFocusView != nullptr && cFocusExt.width && cFocusExt.height) {
+          VkRect2D visibleRect = { { cFocusOff.x, cFocusOff.y }, { cFocusExt.width, cFocusExt.height } };
+
+          ctx->lmuFeatherComposite(cDstView, cFocusView, cFocusSrc, visibleRect,
+            cFullOff, cFullExt, cFeather);
+
+          if (cDebug) {
+            const int32_t t = 4;
+            VkClearValue green = { };
+            green.color.float32[1] = 1.0f;
+            green.color.float32[3] = 1.0f;
+
+            int32_t vx0 = cFocusOff.x, vy0 = cFocusOff.y;
+            int32_t vx1 = vx0 + int32_t(cFocusExt.width), vy1 = vy0 + int32_t(cFocusExt.height);
+            int32_t fx0 = cFullOff.x, fy0 = cFullOff.y;
+            int32_t fx1 = fx0 + int32_t(cFullExt.width), fy1 = fy0 + int32_t(cFullExt.height);
+
+            auto strip = [&] (int32_t sx0, int32_t sy0, int32_t sx1, int32_t sy1) {
+              sx0 = std::max(sx0, vx0); sy0 = std::max(sy0, vy0);
+              sx1 = std::min(sx1, vx1); sy1 = std::min(sy1, vy1);
+              if (sx1 > sx0 && sy1 > sy0)
+                ctx->clearImageView(cDstView, VkOffset3D { sx0, sy0, 0 },
+                  VkExtent3D { uint32_t(sx1 - sx0), uint32_t(sy1 - sy0), 1u },
+                  VK_IMAGE_ASPECT_COLOR_BIT, green);
+            };
+
+            strip(fx0, fy0, fx1, fy0 + t);
+            strip(fx0, fy1 - t, fx1, fy1);
+            strip(fx0, fy0, fx0 + t, fy1);
+            strip(fx1 - t, fy0, fx1, fy1);
+          }
+        }
+      });
+
+      if (dstTextureInfo->HasSequenceNumber())
+        GetTypedContext()->TrackTextureSequenceNumber(dstTextureInfo, DstSubresource);
+
+      return;
+    }
+
+    Rc<DxvkImage> srcResolveImage = m_parent->GetFoveation()->remapResolveSource(srcTextureInfo->GetImage());
+
     if (srcDesc.SampleDesc.Count == 1 || m_parent->GetOptions()->disableMsaa) {
       EmitCs([
         cDstImage  = dstTextureInfo->GetImage(),
-        cSrcImage  = srcTextureInfo->GetImage(),
+        cSrcImage  = srcResolveImage,
         cDstLayers = dstSubresourceLayers,
         cSrcLayers = srcSubresourceLayers
       ] (DxvkContext* ctx) {
@@ -913,7 +1006,7 @@ namespace dxvk {
 
       EmitCs([
         cDstImage  = dstTextureInfo->GetImage(),
-        cSrcImage  = srcTextureInfo->GetImage(),
+        cSrcImage  = srcResolveImage,
         cDstSubres = dstSubresourceLayers,
         cSrcSubres = srcSubresourceLayers,
         cFormat    = format
@@ -3480,6 +3573,38 @@ namespace dxvk {
   void D3D11CommonContext<ContextType>::ApplyViewportState() {
     uint32_t viewportCount = m_state.rs.numViewports;
 
+    // LMU foveation: the eye shadow renders with one viewport per multiview
+    // layer, selected by the vertex patch through ViewportIndex = ViewIndex:
+    // view 0 the eye viewport scaled to the periphery density, view 1 scaled
+    // to the focus crop, both anchored top-left and scissored to themselves.
+    const bool lmuFoveated = m_lmuViewportScale[0] != 1.0f || m_lmuViewportScale[1] != 1.0f;
+
+    if (lmuFoveated && viewportCount) {
+      const auto& vp = m_state.rs.viewports[0];
+
+      EmitCsCmd<DxvkViewport>(D3D11CmdType::None, 2u,
+        [] (DxvkContext* ctx, const DxvkViewport* viewports, size_t count) {
+          ctx->setViewports(count, viewports);
+        });
+
+      for (uint32_t i = 0; i < 2u; i++) {
+        const float s = m_lmuViewportScale[i];
+
+        auto* dst = new (m_csData->at(i)) DxvkViewport();
+        dst->viewport.x = vp.TopLeftX * s;
+        dst->viewport.y = (vp.Height + vp.TopLeftY) * s;
+        dst->viewport.width = vp.Width * s;
+        dst->viewport.height = -vp.Height * s;
+        dst->viewport.minDepth = vp.MinDepth;
+        dst->viewport.maxDepth = vp.MaxDepth;
+        dst->scissor.offset = VkOffset2D { int32_t(vp.TopLeftX * s), int32_t(vp.TopLeftY * s) };
+        dst->scissor.extent = VkExtent2D { uint32_t(vp.Width * s), uint32_t(vp.Height * s) };
+      }
+
+      return;
+    }
+
+
     if (likely(viewportCount)) {
       EmitCsCmd<DxvkViewport>(D3D11CmdType::None, viewportCount,
         [] (DxvkContext* ctx, const DxvkViewport* viewports, size_t count) {
@@ -3707,6 +3832,9 @@ namespace dxvk {
         depthBiasRepresentation.depthBiasRepresentation = FormatToDepthBiasRepresentation(m_state.om.dsv->GetViewFormat());
     }
 
+    // LMU foveation: substitute the eye shadow, latch the gaze for this eye.
+    D3D11FoveaBind lmuBind = m_parent->GetFoveation()->onBindRenderTargets(attachments);
+
     // Create and bind the framebuffer object to the context
     EmitCs([
       cAttachments    = std::move(attachments),
@@ -3720,6 +3848,24 @@ namespace dxvk {
     if (m_state.om.sampleCount != sampleCount) {
       m_state.om.sampleCount = sampleCount;
       ApplyRasterizerSampleCount();
+    }
+
+    // LMU foveation: re-emit the viewports when the target changes to or from
+    // the eye shadow, and push this bind's per-view transform block (identity
+    // for any other target, so single-view draws never see a stale one).
+    std::array<float, 2> lmuScale = { lmuBind.periphery, lmuBind.focus };
+
+    if (m_lmuViewportScale != lmuScale) {
+      m_lmuViewportScale = lmuScale;
+      ApplyViewportState();
+    }
+
+    if (lmuBind.push != m_lmuFoveaPushed) {
+      m_lmuFoveaPushed = lmuBind.push;
+      EmitCs([cPush = lmuBind.push] (DxvkContext* ctx) {
+        ctx->pushData(VK_SHADER_STAGE_ALL_GRAPHICS,
+          DxvkLmuFoveaPushData::Offset, sizeof(cPush), cPush.data());
+      });
     }
   }
 
@@ -3962,10 +4108,24 @@ namespace dxvk {
 
     if (pResource) {
       if (pResource->GetViewInfo().Dimension != D3D11_RESOURCE_DIMENSION_BUFFER) {
+        // LMU foveation: eye colour/depth SRVs go to the shadow / the full-
+        // size depth, refreshed here from the shadow's current contents if it
+        // has been drawn to since (the game samples it mid-frame and both
+        // eyes share one target).
+        const Rc<DxvkImageView>& srcView = pResource->GetImageView();
+        Rc<DxvkImageView> view = m_parent->GetFoveation()->remapShaderResourceView(srcView);
+        D3D11FoveatedSrvUpscale up = m_parent->GetFoveation()->takeSrvUpscale(srcView);
+
+        if (up.active) {
+          EmitCs([cUp = std::move(up)] (DxvkContext* ctx) {
+            ctx->lmuDepthUpscale(cUp.depthDst, cUp.depthSrc, cUp.srcExtent, cUp.dstExtent);
+          });
+        }
+
         EmitCs([
           cSlotId = slotId,
           cStage  = GetShaderStage(ShaderStage),
-          cView   = pResource->GetImageView()
+          cView   = std::move(view)
         ] (DxvkContext* ctx) mutable {
           ctx->bindResourceImageView(cStage, cSlotId,
             Forwarder::move(cView));

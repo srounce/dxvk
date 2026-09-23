@@ -18,6 +18,35 @@ namespace dxvk {
   struct DxvkPipelineStats;
 
   /**
+   * \brief LMU foveation push data
+   *
+   * Occupies the shared graphics push data block, pushed per eye at
+   * render-target bind (identity on every non-foveated bind) and read
+   * by the shader patches enabled by DxvkShaderCompileFlag::LmuFoveation.
+   *
+   * Vertex stage, view 1 only (view 0 is identity, its viewport does the
+   * scaling): pos.xy = pos.xy * focusScale + focusOffset * w magnifies the
+   * focus crop about the gaze to fill its native-sized viewport.
+   *
+   * Fragment stage, applied to SV_Position.xy so screen-space lookups
+   * derived from it address true screen pixels: view 0 multiplies by
+   * fragScale (1 / peripheryScale), view 1 adds fragOffset (the focus
+   * crop origin in native pixels).
+   */
+  struct DxvkLmuFoveaPushData {
+    static constexpr uint32_t Offset = 0u;
+
+    float focusScale[2];
+    float focusOffset[2];
+    float fragScale;
+    float fragOffset[2];
+  };
+
+  static_assert(sizeof(DxvkLmuFoveaPushData) == 28u
+    && DxvkLmuFoveaPushData::Offset + sizeof(DxvkLmuFoveaPushData) <= DxvkLimits::MaxSharedPushDataSize);
+
+
+  /**
    * \brief Shader compile flags
    */
   enum class DxvkShaderCompileFlag : uint32_t {
@@ -63,6 +92,9 @@ namespace dxvk {
     SemanticIo                  = 12u,
     /// Whether to explicitly use BDA for fully-bound constant buffers.
     LowerInBoundsCbvToBda       = 13u,
+    /// LMU foveation: patch vertex position and fragment SV_Position
+    /// per multiview layer (see DxvkLmuFoveaPushData).
+    LmuFoveation                = 14u,
   };
 
   using DxvkShaderCompileFlags = Flags<DxvkShaderCompileFlag>;

@@ -421,6 +421,39 @@ namespace dxvk {
             VkFilter              filter);
     
     /**
+     * \brief LMU foveation: feathered focus composite
+     *
+     * Draws the focus layer (\c srcView, of which the top-left \c srcExtent
+     * holds the crop at native density) 1:1 into \c fullExtent at
+     * \c fullOrigin of \c dstView, blended over the periphery with an alpha
+     * ramp of \c feather (fraction of the rect) at the edges. Only
+     * \c visibleRect is drawn; the mapping uses the full rect, so a focus
+     * clipped at a screen edge stays aligned.
+     */
+    void lmuFeatherComposite(
+            Rc<DxvkImageView>     dstView,
+            Rc<DxvkImageView>     srcView,
+            VkExtent2D            srcExtent,
+            VkRect2D              visibleRect,
+            VkOffset2D            fullOrigin,
+            VkExtent2D            fullExtent,
+            float                 feather);
+
+    /**
+     * \brief LMU foveation: full-size depth for eye-depth readers
+     *
+     * Bilinearly reconstructs the periphery's scaled MSAA depth (\c srcView,
+     * a 2D multisampled view of shadow depth layer 0, of which the top-left
+     * \c srcExtent is the periphery) into \c dstView, a full-size MSAA depth
+     * of \c dstExtent, sample by sample. May run mid-frame at SRV bind.
+     */
+    void lmuDepthUpscale(
+            Rc<DxvkImageView>     dstView,
+            Rc<DxvkImageView>     srcView,
+            VkExtent2D            srcExtent,
+            VkExtent2D            dstExtent);
+
+    /**
      * \brief Clears a buffer with a fixed value
      * 
      * Note that both \c offset and \c length must
@@ -1338,6 +1371,15 @@ namespace dxvk {
 
     uint64_t                m_frameCount = 0u;
     std::pair<uint64_t, uint64_t> m_framesToCapture = {};
+
+    // LMU foveation meta-op pipelines, cached per attachment format.
+    const DxvkPipelineLayout* m_lmuFeatherLayout   = nullptr;
+    VkPipeline                m_lmuFeatherPipeline = VK_NULL_HANDLE;
+    VkFormat                  m_lmuFeatherFormat   = VK_FORMAT_UNDEFINED;
+    const DxvkPipelineLayout* m_lmuDepthLayout     = nullptr;
+    VkPipeline                m_lmuDepthPipeline   = VK_NULL_HANDLE;
+    VkFormat                  m_lmuDepthFormat     = VK_FORMAT_UNDEFINED;
+    VkSampleCountFlagBits     m_lmuDepthSamples    = VK_SAMPLE_COUNT_1_BIT;
 
     uint64_t                m_trackingId = 0u;
     uint64_t                m_submitWaitId = 0u;

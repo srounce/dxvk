@@ -44,8 +44,12 @@ namespace dxvk {
     DxvkAttachment depth;
     DxvkAttachment color[MaxNumRenderTargets];
 
+    /// Multiview view mask; 0 = no multiview. Non-zero requires every
+    /// attachment view to cover the highest view index.
+    uint32_t viewMask = 0u;
+
     bool operator == (const DxvkRenderTargets& other) const {
-      bool eq = depth == other.depth;
+      bool eq = depth == other.depth && viewMask == other.viewMask;
 
       for (uint32_t i = 0; i < MaxNumRenderTargets && eq; i++)
         eq = color[i] == other.color[i];

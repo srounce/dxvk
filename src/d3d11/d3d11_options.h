@@ -39,6 +39,35 @@ namespace dxvk {
     /// but might also cause rendering issues.
     bool relaxedGraphicsBarriers = false;
 
+    /// LMU emulated quad-views foveated rendering. Off by default.
+    bool lmuFoveation = false;
+
+    /// Focus crop: the part of the field of view rendered at native resolution,
+    /// as a fraction of the screen width and height (0..1), centred on the gaze.
+    float lmuFoveationFocusCrop = 0.4f;
+
+    /// Periphery render scale, as a fraction of native resolution (0.25 =
+    /// quarter). Independent of the focus crop.
+    float lmuFoveationPeripheryScale = 0.5f;
+
+    /// Per-eye nasal inset of the focus centre in NDC, used when gaze is
+    /// unavailable. Applied toward the nose: opposite sign per eye.
+    float lmuFoveationFocusInset = 0.25f;
+
+    /// Feather width of the focus edge, as a fraction of the focus rectangle.
+    float lmuFoveationFeather = 0.15f;
+
+    /// Drive the focus centre from gaze in Z:\dev\shm\lmu_gaze.
+    bool lmuFoveationGaze = false;
+
+    /// Remap fragment SV_Position to true screen pixels in the foveated views,
+    /// so screen-space lookups (shadow/AO/reflection masks) address the right
+    /// place. On by default; a toggle for A/B validation.
+    bool lmuFoveationFragCoordRemap = true;
+
+    /// Draws a green border around the focus rectangle.
+    bool lmuFoveationDebug = false;
+
     /// Maximum tessellation factor.
     ///
     /// Limits tessellation factors in tessellation

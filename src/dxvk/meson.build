@@ -4,6 +4,9 @@ dxvk_shaders = files([
 
   'shaders/dxvk_dummy_frag.frag',
 
+  'shaders/dxvk_lmu_depth_upscale_frag.frag',
+  'shaders/dxvk_lmu_feather_frag.frag',
+
   'shaders/dxvk_mipgen.comp',
 
   'shaders/dxvk_present_frag.frag',
