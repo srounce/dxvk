@@ -65,6 +65,10 @@ namespace dxvk {
     /// place. On by default; a toggle for A/B validation.
     bool lmuFoveationFragCoordRemap = true;
 
+    /// Disable foveation when focusCrop^2 + peripheryScale^2 reaches 1, i.e.
+    /// when it would shade at least as many pixels as native rendering.
+    bool lmuFoveationCostGuard = true;
+
     /// Draws a green border around the focus rectangle.
     bool lmuFoveationDebug = false;
 

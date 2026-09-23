@@ -96,6 +96,21 @@ namespace dxvk {
       return;
     }
 
+    // Per-pixel cost relative to a native eye. At or above 1 the two views
+    // shade more pixels than the eye they replace.
+    const float cost = m_peripheryScale * m_peripheryScale + m_focusCrop * m_focusCrop;
+
+    if (cost >= 1.0f) {
+      Logger::warn(str::format("LMU-FOVEATION: pixel cost ", cost,
+        " of native (periphery ", m_peripheryScale, "^2 + focus ", m_focusCrop, "^2)",
+        opts->lmuFoveationCostGuard ? "; disabled" : "; cost guard off, continuing"));
+
+      if (opts->lmuFoveationCostGuard) {
+        m_enabled = false;
+        return;
+      }
+    }
+
     Logger::info(str::format("LMU-FOVEATION: enabled, focus crop ", m_focusCrop,
       ", periphery scale ", m_peripheryScale, ", shadow scale ", m_scale,
       ", gaze ", (m_gaze ? "yes" : "no"),

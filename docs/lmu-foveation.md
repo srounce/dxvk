@@ -22,6 +22,7 @@ is the operating guide.
 | `d3d11.lmuFoveationFocusInset` | per-eye nasal inset (NDC) when gaze is unavailable | 0.25 |
 | `d3d11.lmuFoveationFeather` | focus edge feather, fraction of the rect | 0.15 |
 | `d3d11.lmuFoveationFragCoordRemap` | remap fragment SV_Position to true screen pixels | True |
+| `d3d11.lmuFoveationCostGuard` | disable when `focusCrop^2 + peripheryScale^2` reaches 1 | True |
 | `d3d11.lmuFoveationDebug` | green outline on the focus rect | False |
 
 GPU cost is roughly `focusCrop^2 + peripheryScale^2` of a native eye for the
