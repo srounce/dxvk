@@ -20,6 +20,7 @@ namespace dxvk {
     this->maxTessFactor         = config.getOption<int32_t>("d3d11.maxTessFactor", 0);
     this->lmuFoveation          = config.getOption<bool>("d3d11.lmuFoveation", false);
     this->lmuFoveationFocusCrop = config.getOption<float>("d3d11.lmuFoveationFocusCrop", 0.4f);
+    this->lmuFoveationFocusScale = config.getOption<float>("d3d11.lmuFoveationFocusScale", 1.0f);
     this->lmuFoveationPeripheryScale = config.getOption<float>("d3d11.lmuFoveationPeripheryScale", 0.5f);
     this->lmuFoveationFocusInset = config.getOption<float>("d3d11.lmuFoveationFocusInset", 0.25f);
     this->lmuFoveationFeather   = config.getOption<float>("d3d11.lmuFoveationFeather", 0.15f);

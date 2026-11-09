@@ -46,6 +46,10 @@ namespace dxvk {
     /// as a fraction of the screen width and height (0..1), centred on the gaze.
     float lmuFoveationFocusCrop = 0.4f;
 
+    /// Focus render density relative to native (1.5 = 1.5x1.5 shaded pixels
+    /// per screen pixel). Clamped so the focus never exceeds the eye size.
+    float lmuFoveationFocusScale = 1.0f;
+
     /// Periphery render scale, as a fraction of native resolution (0.25 =
     /// quarter). Independent of the focus crop.
     float lmuFoveationPeripheryScale = 0.5f;

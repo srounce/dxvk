@@ -4,21 +4,23 @@
 //
 // The game renders each eye's scene into one MSAA colour+depth target (both
 // eyes through the same target, one after the other). When enabled, that
-// target is shadowed by a two-layer array sized max(peripheryScale, focusCrop)
-// x eye and rendered in ONE multiview pass, each layer through its own
-// viewport anchored top-left in its layer:
+// target is shadowed by a two-layer array sized
+// max(peripheryScale, focusCrop * focusScale) x eye and rendered in ONE
+// multiview pass, each layer through its own viewport anchored top-left in
+// its layer:
 //
 //   layer 0 (periphery): the full field of view through a viewport of
 //     peripheryScale x eye, i.e. at peripheryScale density;
 //   layer 1 (focus): the focusCrop-sized region around the gaze, magnified by
-//     1/focusCrop in the vertex shader, through a viewport of focusCrop x eye,
-//     i.e. at exactly native density. Geometry outside the crop is clipped.
+//     1/focusCrop in the vertex shader, through a viewport of
+//     focusCrop * focusScale x eye, i.e. at focusScale times native density
+//     (1.0 = exactly native). Geometry outside the crop is clipped.
 //
 // A view only shades its own viewport, so per-pixel cost is
-// peripheryScale^2 + focusCrop^2 of a native eye, the focus is never
-// supersampled, and the two knobs are independent. At the game's MSAA
-// resolve, layer 0 is upscaled over the game's resolved image and layer 1 is
-// composited 1:1 into the focus rectangle with a feathered edge; a focus that
+// peripheryScale^2 + (focusCrop * focusScale)^2 of a native eye and the knobs
+// are independent. At the game's MSAA resolve, layer 0 is upscaled over the
+// game's resolved image and layer 1 is composited into the focus rectangle
+// (bilinearly filtered down when focusScale > 1) with a feathered edge; a focus that
 // runs off a screen edge is clipped, not re-centred, so both eyes stay aligned.
 //
 // Everything the game reads back from the eye target is redirected: clears
@@ -69,12 +71,12 @@ namespace dxvk {
    * the bound target is the foveated eye shadow), and the per-eye push block
    * for the shader patch (identity for any other bind, so single-view draws
    * never see a stale transform). Layout matches DxvkLmuFoveaPushData:
-   * focusScale[2], focusOffset[2], fragScale, fragOffset[2].
+   * focusScale[2], focusOffset[2], fragScale[2], fragOffset[2].
    */
   struct D3D11FoveaBind {
     float periphery = 1.0f;
     float focus     = 1.0f;
-    std::array<float, 7> push = { 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f };
+    std::array<float, 8> push = { 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f };
 
     static_assert(sizeof(push) == sizeof(DxvkLmuFoveaPushData));
 
@@ -127,7 +129,8 @@ namespace dxvk {
     Rc<DxvkImage>     shadowDepth;          ///< two-layer MSAA depth
     VkExtent2D        shadowExtent = { };
     VkExtent2D        peripheryExtent = { }; ///< peripheryScale x eye
-    VkExtent2D        focusExtent = { };     ///< focusCrop x eye
+    VkExtent2D        focusExtent = { };     ///< focusCrop x eye, the on-screen rect
+    VkExtent2D        focusRenderExtent = { }; ///< focusCrop * focusScale x eye, the viewport
 
     Rc<DxvkImage>     shadowResolved;       ///< single-sample scratch, two layers
     Rc<DxvkImageView> shadowResolvedView;   ///< layer 0
@@ -226,7 +229,8 @@ namespace dxvk {
     bool          m_fragRemap      = true;
     float         m_peripheryScale = 0.5f;
     float         m_focusCrop      = 0.4f;
-    float         m_scale          = 1.0f;   ///< shadow scale = max(periphery, focus)
+    float         m_focusScale     = 1.0f;   ///< focus density relative to native
+    float         m_scale          = 1.0f;   ///< shadow scale = max(periphery, crop * focusScale)
     float         m_focusInset     = 0.25f;
     float         m_feather        = 0.15f;
 

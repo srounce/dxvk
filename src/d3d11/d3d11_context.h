@@ -788,7 +788,7 @@ namespace dxvk {
     // eye shadow; and the last per-view push block emitted, so BindFramebuffer
     // only re-pushes on change (starts as a sentinel so the first bind pushes).
     std::array<float, 2>  m_lmuViewportScale = { 1.0f, 1.0f };
-    std::array<float, 7>  m_lmuFoveaPushed = { };
+    std::array<float, 8>  m_lmuFoveaPushed = { };
 
     D3D11DeviceContextExt<ContextType>        m_contextExt;
     D3D11UserDefinedAnnotation<ContextType>   m_annotation;

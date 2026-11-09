@@ -16,16 +16,17 @@ is the operating guide.
 | key | meaning | default |
 |---|---|---|
 | `d3d11.lmuFoveation` | master switch | False |
-| `d3d11.lmuFoveationFocusCrop` | sharp region, fraction of width/height around the gaze, always native | 0.4 |
+| `d3d11.lmuFoveationFocusCrop` | sharp region, fraction of width/height around the gaze | 0.4 |
+| `d3d11.lmuFoveationFocusScale` | focus render density relative to native (1.5 = 1.5x per axis, filtered down at the composite), clamped so `focusCrop * focusScale <= 1` | 1.0 |
 | `d3d11.lmuFoveationPeripheryScale` | periphery resolution, fraction of native | 0.5 |
 | `d3d11.lmuFoveationGaze` | drive the focus from `Z:\dev\shm\lmu_gaze` | False |
 | `d3d11.lmuFoveationFocusInset` | per-eye nasal inset (NDC) when gaze is unavailable | 0.25 |
 | `d3d11.lmuFoveationFeather` | focus edge feather, fraction of the rect | 0.15 |
 | `d3d11.lmuFoveationFragCoordRemap` | remap fragment SV_Position to true screen pixels | True |
-| `d3d11.lmuFoveationCostGuard` | disable when `focusCrop^2 + peripheryScale^2` reaches 1 | True |
+| `d3d11.lmuFoveationCostGuard` | disable when `(focusCrop * focusScale)^2 + peripheryScale^2` reaches 1 | True |
 | `d3d11.lmuFoveationDebug` | green outline on the focus rect | False |
 
-GPU cost is roughly `focusCrop^2 + peripheryScale^2` of a native eye for the
+GPU cost is roughly `(focusCrop * focusScale)^2 + peripheryScale^2` of a native eye for the
 per-pixel stages, plus the geometry drawn twice (one pass, two views).
 `peripheryScale = 1.0` disables foveation entirely (nothing to shrink).
 

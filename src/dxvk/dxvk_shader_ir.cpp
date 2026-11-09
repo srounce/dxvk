@@ -2324,10 +2324,11 @@ namespace dxvk {
 
   // Fragment: SV_Position is viewport-local in the foveated views (the
   // periphery viewport is peripheryScale x eye, the focus viewport is the
-  // crop). Remap its x and y to true screen pixels so screen-space lookups
-  // derived from it (shadow, AO and reflection masks) address the right place:
-  //   view 0: xy * fragXform[0]            (1 / periphery scale)
-  //   view 1: xy + (fragXform[1], [2])     (focus crop origin, pixels)
+  // crop at focusScale density). Remap its x and y to true screen pixels so
+  // screen-space lookups derived from it (shadow, AO and reflection masks)
+  // address the right place:
+  //   view 0: xy * fragScale[0]               (1 / periphery scale)
+  //   view 1: xy * fragScale[1] + fragOffset  (1 / focus scale, crop origin px)
   // Each scalar load of components 0/1 is rewritten in place, so every use
   // sees the remapped value. Identity is pushed for non-foveated binds.
   static void lmuFoveationPatchFragment(dxbc_spv::ir::Builder& builder) {
@@ -2397,12 +2398,12 @@ namespace dxvk {
       ir::ScalarType::eU32, entryPoint, ir::BuiltIn::eViewIndex));
     builder.add(ir::Op::DebugName(viewIn, "lmuViewIndex"));
 
-    static const char* const s_pushNames[3] = {
-      "lmuFragScale0", "lmuFragOffset1X", "lmuFragOffset1Y" };
+    static const char* const s_pushNames[4] = {
+      "lmuFragScale0", "lmuFragScale1", "lmuFragOffset1X", "lmuFragOffset1Y" };
 
-    std::array<ir::SsaDef, 3u> push = { };
+    std::array<ir::SsaDef, 4u> push = { };
 
-    for (uint32_t i = 0u; i < 3u; i++) {
+    for (uint32_t i = 0u; i < 4u; i++) {
       push[i] = builder.add(ir::Op::DclPushData(ir::ScalarType::eF32, entryPoint,
         DxvkLmuFoveaPushData::Offset + offsetof(DxvkLmuFoveaPushData, fragScale)
           + uint32_t(sizeof(float)) * i, ir::ShaderStageMask()));
@@ -2410,7 +2411,6 @@ namespace dxvk {
     }
 
     auto c1   = builder.makeConstant(uint32_t(1u));
-    auto one  = builder.makeConstant(1.0f);
     auto zero = builder.makeConstant(0.0f);
 
     const ir::Type f32(ir::ScalarType::eF32);
@@ -2424,8 +2424,9 @@ namespace dxvk {
       auto view    = builder.addBefore(load, ir::Op::InputLoad(u32, viewIn, ir::SsaDef()));
       auto isFocus = builder.addBefore(load, ir::Op::IEq(b32, view, c1));
       auto sP      = builder.addBefore(load, ir::Op::PushDataLoad(f32, push[0], ir::SsaDef()));
-      auto oF      = builder.addBefore(load, ir::Op::PushDataLoad(f32, push[1u + component], ir::SsaDef()));
-      auto scale   = builder.addBefore(load, ir::Op::Select(f32, isFocus, one, sP));
+      auto sF      = builder.addBefore(load, ir::Op::PushDataLoad(f32, push[1], ir::SsaDef()));
+      auto oF      = builder.addBefore(load, ir::Op::PushDataLoad(f32, push[2u + component], ir::SsaDef()));
+      auto scale   = builder.addBefore(load, ir::Op::Select(f32, isFocus, sF, sP));
       auto offset  = builder.addBefore(load, ir::Op::Select(f32, isFocus, oF, zero));
 
       builder.rewriteOp(load, ir::Op::FMad(f32, raw, scale, offset));

@@ -30,19 +30,20 @@ namespace dxvk {
    *
    * Fragment stage, applied to SV_Position.xy so screen-space lookups
    * derived from it address true screen pixels: view 0 multiplies by
-   * fragScale (1 / peripheryScale), view 1 adds fragOffset (the focus
-   * crop origin in native pixels).
+   * fragScale[0] (1 / peripheryScale), view 1 multiplies by fragScale[1]
+   * (1 / focusScale) and adds fragOffset (the focus crop origin in native
+   * pixels).
    */
   struct DxvkLmuFoveaPushData {
     static constexpr uint32_t Offset = 0u;
 
     float focusScale[2];
     float focusOffset[2];
-    float fragScale;
+    float fragScale[2];
     float fragOffset[2];
   };
 
-  static_assert(sizeof(DxvkLmuFoveaPushData) == 28u
+  static_assert(sizeof(DxvkLmuFoveaPushData) == 32u
     && DxvkLmuFoveaPushData::Offset + sizeof(DxvkLmuFoveaPushData) <= DxvkLimits::MaxSharedPushDataSize);
 
 

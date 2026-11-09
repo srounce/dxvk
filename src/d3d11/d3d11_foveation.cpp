@@ -77,9 +77,10 @@ namespace dxvk {
     m_fragRemap      = opts->lmuFoveationFragCoordRemap;
     m_peripheryScale = std::clamp(opts->lmuFoveationPeripheryScale, 0.1f, 1.0f);
     m_focusCrop      = std::clamp(opts->lmuFoveationFocusCrop,      0.1f, 1.0f);
+    m_focusScale     = std::clamp(opts->lmuFoveationFocusScale, 1.0f, 1.0f / m_focusCrop);
     m_focusInset     = opts->lmuFoveationFocusInset;
     m_feather        = std::clamp(opts->lmuFoveationFeather, 0.0f, 0.5f);
-    m_scale          = std::max(m_peripheryScale, m_focusCrop);
+    m_scale          = std::max(m_peripheryScale, m_focusCrop * m_focusScale);
 
     if (!m_enabled)
       return;
@@ -91,18 +92,19 @@ namespace dxvk {
     // is no foveation to do.
     if (!m_multiview || m_scale >= 1.0f) {
       Logger::info(str::format("LMU-FOVEATION: inactive (",
-        !m_multiview ? "multiview or vertex viewport index unavailable" : "periphery scale 1.0", ")"));
+        !m_multiview ? "multiview or vertex viewport index unavailable" : "shadow scale 1.0", ")"));
       m_enabled = false;
       return;
     }
 
     // Per-pixel cost relative to a native eye. At or above 1 the two views
     // shade more pixels than the eye they replace.
-    const float cost = m_peripheryScale * m_peripheryScale + m_focusCrop * m_focusCrop;
+    const float focusDensity = m_focusCrop * m_focusScale;
+    const float cost = m_peripheryScale * m_peripheryScale + focusDensity * focusDensity;
 
     if (cost >= 1.0f) {
       Logger::warn(str::format("LMU-FOVEATION: pixel cost ", cost,
-        " of native (periphery ", m_peripheryScale, "^2 + focus ", m_focusCrop, "^2)",
+        " of native (periphery ", m_peripheryScale, "^2 + focus ", focusDensity, "^2)",
         opts->lmuFoveationCostGuard ? "; disabled" : "; cost guard off, continuing"));
 
       if (opts->lmuFoveationCostGuard) {
@@ -112,6 +114,7 @@ namespace dxvk {
     }
 
     Logger::info(str::format("LMU-FOVEATION: enabled, focus crop ", m_focusCrop,
+      ", focus scale ", m_focusScale,
       ", periphery scale ", m_peripheryScale, ", shadow scale ", m_scale,
       ", gaze ", (m_gaze ? "yes" : "no"),
       ", fragcoord remap ", (m_fragRemap ? "yes" : "no")));
@@ -247,6 +250,8 @@ namespace dxvk {
       };
       target.peripheryExtent = { sub(m_peripheryScale, c.extent.width), sub(m_peripheryScale, c.extent.height) };
       target.focusExtent     = { sub(m_focusCrop,      c.extent.width), sub(m_focusCrop,      c.extent.height) };
+      target.focusRenderExtent = { sub(m_focusCrop * m_focusScale, c.extent.width),
+                                   sub(m_focusCrop * m_focusScale, c.extent.height) };
     }
 
     auto result = m_targets.insert({ colorImage, std::move(target) });
@@ -337,22 +342,25 @@ namespace dxvk {
     // eye viewport (square pixels, so width sets the factor).
     const double eyeWidth = double(target.sourceColor->info().extent.width);
     bind.periphery = float(double(target.peripheryExtent.width) / eyeWidth);
-    bind.focus     = float(double(target.focusExtent.width)     / eyeWidth);
+    bind.focus     = float(double(target.focusRenderExtent.width) / eyeWidth);
 
     // Vertex: view 1 maps the crop [g-f, g+f] around the gaze g onto clip [-1, 1]
     // (view 0 is identity, its viewport does the scaling):
     //   pos.xy' = pos.xy / f - (g / f) * w
     // Fragment: view 0 SV_Position is viewport-local at periphery scale, so
-    // multiply by its inverse; view 1's is local to the focus viewport, so add
-    // the focus rect origin. Both yield true screen pixels.
+    // multiply by its inverse; view 1's is local to the focus viewport at
+    // focusScale density, so divide by that and add the focus rect origin.
+    // Both yield true screen pixels.
     const float f  = m_focusCrop;
     const float gx = m_latchX[eye];
     const float gy = m_latchY[eye];
+    const float focusDensity = float(double(target.focusRenderExtent.width) / double(target.focusExtent.width));
 
     bind.push = {
       1.0f / f, 1.0f / f,                     // focusScale
       -gx / f,  -gy / f,                      // focusOffset
-      m_fragRemap ? 1.0f / bind.periphery : 1.0f,   // fragScale
+      m_fragRemap ? 1.0f / bind.periphery : 1.0f,   // fragScale[0]
+      m_fragRemap ? 1.0f / focusDensity : 1.0f,     // fragScale[1]
       m_fragRemap ? float(m_latchFx[eye]) : 0.0f,   // fragOffset
       m_fragRemap ? float(m_latchFy[eye]) : 0.0f };
 
@@ -547,7 +555,7 @@ namespace dxvk {
     op.dstExtent          = { dstExtent.width, dstExtent.height };
     op.layerCount         = 2u;
     op.peripherySrcExtent = target.peripheryExtent;
-    op.focusSrcExtent     = target.focusExtent;
+    op.focusSrcExtent     = target.focusRenderExtent;
 
     // Focus rectangle: the latched origin and the native-sized crop, clipped
     // to the image (the composite maps by position within the full rect).
